@@ -1,0 +1,58 @@
+commit df8713dda845f15de995128a792b041a53b216ed
+Author: Manan Sharma <manansharma@vt.edu>
+Date:   2026-10-28 18:17:29 -0400
+
+    Complete M4 responsive corpus builds
+
+ .gitignore                                 |   5 +
+ CMakeLists.txt                             |  57 ++++
+ DESIGN.md                                  |  55 ++++
+ data/public/doc_ai.txt                     |   3 +
+ data/public/doc_retrieval.txt              |   3 +
+ data/public/doc_systems.txt                |   3 +
+ data/public/queries.txt                    |   4 +
+ include/aiws/chunker.hpp                   |  25 ++
+ include/aiws/chunking_strategy.hpp         |  18 ++
+ include/aiws/context_builder.hpp           |  13 +
+ include/aiws/context_strategy.hpp          |  17 ++
+ include/aiws/corpus_index.hpp              |  36 +++
+ include/aiws/document.hpp                  |  22 ++
+ include/aiws/gui/context_widget.hpp        |  75 +++++
+ include/aiws/gui/main_window.hpp           | 180 ++++++++++++
+ include/aiws/gui/resettable.hpp            |  22 ++
+ include/aiws/gui/search_result_model.hpp   |  84 ++++++
+ include/aiws/gui/search_widget.hpp         | 105 +++++++
+ include/aiws/gui/term_inspector_widget.hpp |  81 ++++++
+ include/aiws/gui/workspace_widget.hpp      | 101 +++++++
+ include/aiws/processing_core.hpp           |  53 ++++
+ include/aiws/processing_types.hpp          |  38 +++
+ include/aiws/retrieval_engine.hpp          |  18 ++
+ include/aiws/retrieval_strategy.hpp        |  20 ++
+ include/aiws/text_processor.hpp            |  29 ++
+ include/aiws/workspace.hpp                 |  19 ++
+ src/chunker.cpp                            |  59 ++++
+ src/context_builder.cpp                    |  29 ++
+ src/context_widget.cpp                     |  89 ++++++
+ src/corpus_index.cpp                       |  72 +++++
+ src/document.cpp                           |  14 +
+ src/main.cpp                               |  41 +++
+ src/main_window.cpp                        | 452 +++++++++++++++++++++++++++++
+ src/processing_core.cpp                    | 103 +++++++
+ src/retrieval_engine.cpp                   |  86 ++++++
+ src/search_result_model.cpp                |  86 ++++++
+ src/search_widget.cpp                      | 157 ++++++++++
+ src/term_inspector_widget.cpp              |  82 ++++++
+ src/text_processor.cpp                     | 116 ++++++++
+ src/workspace.cpp                          |  17 ++
+ src/workspace_widget.cpp                   |  85 ++++++
+ tests/student_tests.cpp                    | 112 +++++++
+ 42 files changed, 2686 insertions(+)
+
+commit b8b5c9abbe1ed985ab13768896c01d6683f37f75
+Author: Manan Sharma <manansharma@vt.edu>
+Date:   2026-10-27 12:44:04 -0400
+
+    Add M4 design checkpoint note
+
+ DESIGN_NOTE.md | 70 +++++++++
+ 1 file changed, 70 insertions(+)
