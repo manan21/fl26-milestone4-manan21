@@ -1,3 +1,35 @@
+﻿commit 0c6b398570c134d96d159f868e7aef35890c3d55
+Author: manansharma <manansharma@vt.edu>
+Date:   2026-11-05 14:15:02 -0500
+
+    Update repository history for CR1
+
+ HISTORY.txt | Bin 2766 -> 7430 bytes
+ 1 file changed, 0 insertions(+), 0 deletions(-)
+
+commit 867315fedac7d366911c7a802b5b9d2570eb1a6a
+Author: manansharma <manansharma@vt.edu>
+Date:   2026-11-05 14:14:57 -0500
+
+    Implement M4 CR1 remote document adds
+
+ CMakeLists.txt                   |   3 +
+ DESIGN.md                        |  37 ++++++++--
+ include/aiws/gui/main_window.hpp |  14 ++++
+ src/main.cpp                     |  17 +++++
+ src/main_window.cpp              |  97 +++++++++++++++++++++++++
+ tools/aiws_send.cpp              | 151 +++++++++++++++++++++++++++++++++++++++
+ 6 files changed, 315 insertions(+), 4 deletions(-)
+
+commit 7ad606663302e0631ceaae930cc4b42595966456
+Author: Manan Sharma <manansharma@vt.edu>
+Date:   2026-10-28 18:18:05 -0400
+
+    Add M4 repository history
+
+ HISTORY.txt | 58 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 58 insertions(+)
+
 commit df8713dda845f15de995128a792b041a53b216ed
 Author: Manan Sharma <manansharma@vt.edu>
 Date:   2026-10-28 18:17:29 -0400
@@ -54,5 +86,5 @@ Date:   2026-10-27 12:44:04 -0400
 
     Add M4 design checkpoint note
 
- DESIGN_NOTE.md | 70 +++++++++
+ DESIGN_NOTE.md | 70 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
  1 file changed, 70 insertions(+)
