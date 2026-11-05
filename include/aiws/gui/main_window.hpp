@@ -65,12 +65,21 @@ public:
     /** Sets the additional build delay applied per source document. */
     void set_build_delay_ms(int ms_per_document) noexcept;
 
+    /** Starts the CR-1 Unix-domain socket server. */
+    bool start_ipc_server(const QString& socket_path);
+
+    /** Stops the CR-1 server and removes its socket file. */
+    void stop_ipc_server();
+
 private slots:
     /** @brief Handles a request to select and add a document to the workspace. */
     void add_document();
 
     /** Checks for completion of the background corpus build. */
     void poll_build_result();
+
+    /** Applies an already-validated remote document on the GUI thread. */
+    void add_remote_document(const QString& path);
 
     /** @brief Rebuilds the processing corpus from the current non-empty workspace. */
     void build_corpus();
@@ -140,6 +149,7 @@ private:
     void closeEvent(class QCloseEvent* event) override;
     void stop_build();
     void join_build();
+    void start_ipc_worker(const QString& socket_path);
 
     /**
      * @brief Updates availability of actions that depend on current application state.
@@ -167,6 +177,10 @@ private:
     ExitCallback exit_callback_{nullptr};
     std::unique_ptr<BuildState> build_state_;
     class QTimer* build_timer_{nullptr};
+    std::thread ipc_thread_;
+    std::shared_ptr<std::atomic<bool>> ipc_stop_;
+    QString ipc_socket_path_;
+    std::atomic<int> ipc_listen_socket_{-1};
 
     WorkspaceWidget* workspace_widget_{nullptr};
     SearchWidget* search_widget_{nullptr};

@@ -3,8 +3,17 @@
 #include <QApplication>
 #include <QMessageBox>
 #include <QString>
+#include <unistd.h>
 
 namespace {
+
+QString default_ipc_socket() {
+    const QByteArray user = qgetenv("USER");
+    if (!user.isEmpty()) {
+        return QStringLiteral("/tmp/aiws-%1.sock").arg(QString::fromUtf8(user));
+    }
+    return QStringLiteral("/tmp/aiws-%1.sock").arg(QString::number(geteuid()));
+}
 
 void confirm_exit(QWidget* parent) {
     const auto answer = QMessageBox::question(
@@ -27,6 +36,11 @@ int main(int argc, char* argv[]) {
     window.set_exit_callback(&confirm_exit);
 
     const QStringList arguments = application.arguments();
+    QString ipc_socket = default_ipc_socket();
+    const int ipc_index = arguments.indexOf(QStringLiteral("--ipc-socket"));
+    if (ipc_index >= 0 && ipc_index + 1 < arguments.size()) {
+        ipc_socket = arguments.at(ipc_index + 1);
+    }
     const int delay_index = arguments.indexOf(QStringLiteral("--build-delay-ms"));
     if (delay_index >= 0 && delay_index + 1 < arguments.size()) {
         bool valid = false;
@@ -34,6 +48,9 @@ int main(int argc, char* argv[]) {
         if (valid && delay_ms >= 0) {
             window.set_build_delay_ms(delay_ms);
         }
+    }
+    if (!window.start_ipc_server(ipc_socket)) {
+        return 1;
     }
     window.show();
 

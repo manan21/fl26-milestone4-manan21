@@ -30,6 +30,13 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <cerrno>
+#include <cstring>
+#include <fcntl.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
 
 namespace aiws::gui {
 
@@ -148,6 +155,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 MainWindow::~MainWindow() {
     stop_build();
     join_build();
+    stop_ipc_server();
 }
 
 void MainWindow::set_exit_callback(ExitCallback callback) noexcept {
@@ -156,6 +164,95 @@ void MainWindow::set_exit_callback(ExitCallback callback) noexcept {
 
 void MainWindow::set_build_delay_ms(int ms_per_document) noexcept {
     build_delay_ms_ = ms_per_document >= 0 ? ms_per_document : 0;
+}
+
+bool MainWindow::start_ipc_server(const QString& socket_path) {
+    ipc_socket_path_ = socket_path;
+    ipc_stop_ = std::make_shared<std::atomic<bool>>(false);
+    ipc_thread_ = std::thread([this, socket_path = socket_path.toStdString(),
+                               stop = ipc_stop_] {
+        const int listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (listen_fd < 0) return;
+        sockaddr_un address{};
+        address.sun_family = AF_UNIX;
+        if (socket_path.size() >= sizeof(address.sun_path)) {
+            ::close(listen_fd);
+            return;
+        }
+        std::memcpy(address.sun_path, socket_path.data(), socket_path.size());
+        unlink(socket_path.c_str());
+        if (bind(listen_fd, reinterpret_cast<sockaddr*>(&address),
+                 sizeof(address)) < 0 ||
+            listen(listen_fd, 16) < 0) {
+            ::close(listen_fd);
+            return;
+        }
+        ipc_listen_socket_ = listen_fd;
+
+        pollfd poll_fd{listen_fd, POLLIN, 0};
+        while (!stop->load()) {
+            if (poll(&poll_fd, 1, 50) <= 0) continue;
+            sockaddr_storage unused{};
+            socklen_t unused_length = sizeof(unused);
+            const int client = accept4(listen_fd, reinterpret_cast<sockaddr*>(&unused),
+                                       &unused_length, SOCK_CLOEXEC);
+            if (client < 0) continue;
+
+            std::uint32_t length_network = 0;
+            const ssize_t header = recv(client, &length_network, 4, MSG_WAITALL);
+            if (header == 4) {
+                const std::uint32_t length =
+                    __builtin_bswap32(length_network);
+                std::string payload(length, '\0');
+                const ssize_t payload_bytes =
+                    length <= 16u * 1024u * 1024u
+                        ? recv(client, payload.data(), length, MSG_WAITALL)
+                        : -1;
+                std::string response;
+                if (payload_bytes >= 0 &&
+                    static_cast<std::size_t>(payload_bytes) == length &&
+                    length >= 4 && payload.compare(0, 4, "ADD ", 4) == 0) {
+                    const QString path =
+                        QString::fromUtf8(payload.data() + 4,
+                                          static_cast<int>(length - 4));
+                    QFile file(path);
+                    if (!file.open(QIODevice::ReadOnly)) {
+                        response = "ERR unreadable file";
+                    } else {
+                        file.close();
+                        response = "OK";
+                        QMetaObject::invokeMethod(
+                            this, "add_remote_document",
+                            Qt::QueuedConnection,
+                            Q_ARG(QString, path));
+                    }
+                } else {
+                    response = "ERR invalid request";
+                }
+                send(client, response.data(), response.size(), MSG_NOSIGNAL);
+            }
+            ::close(client);
+        }
+        ::close(listen_fd);
+        ipc_listen_socket_ = -1;
+        unlink(socket_path.c_str());
+    });
+    return true;
+}
+
+void MainWindow::stop_ipc_server() {
+    if (ipc_stop_) ipc_stop_->store(true);
+    if (ipc_listen_socket_ >= 0) shutdown(ipc_listen_socket_, SHUT_RDWR);
+    if (ipc_thread_.joinable()) ipc_thread_.join();
+    ipc_stop_.reset();
+    ipc_listen_socket_ = -1;
+    if (!ipc_socket_path_.isEmpty()) {
+        unlink(ipc_socket_path_.toStdString().c_str());
+    }
+}
+
+void MainWindow::add_remote_document(const QString& path) {
+    (void)add_document_file(path);
 }
 
 bool MainWindow::add_document_file(const QString& path) {

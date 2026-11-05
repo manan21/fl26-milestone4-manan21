@@ -35,10 +35,24 @@ queued invocation, allowing the worker to remain wholly free of Qt objects.
 
 ## CR-1
 
-No CR-1 specification has been provided in this repository, so no external
-event source is implemented yet. The GUI-thread revision invalidation API and
-completion boundary are isolated in `MainWindow`, making later CR-1 events able
-to invalidate the workspace without changing worker/build ownership.
+`MainWindow::start_ipc_server()` owns the POSIX Unix-domain stream server on
+an independent `std::thread`. It reads requests, checks readability, replies,
+and queues the document mutation with `QMetaObject::invokeMethod`. The reply
+does not wait for GUI processing. The GUI mutates the workspace and increments
+`workspace_revision_`, so remote documents invalidate an in-progress build like
+local documents.
+
+CR-1 wire protocol:
+
+1. Client sends a four-byte big-endian network-order `uint32_t` payload length.
+2. Payload bytes are exactly `ADD ` followed by an absolute UTF-8 path; spaces,
+   non-ASCII characters, and newline are payload bytes rather than delimiters.
+3. Server reads exactly the length (including across partial writes), then replies
+   with bytes `OK` for a readable file or `ERR...` for rejection.
+
+The server uses a Unix-domain stream socket and 50 ms shutdown polling.
+`stop_ipc_server()` sets cancellation, shuts down the listener, joins the
+server thread, and unlinks the socket.
 
 ## Fault switches
 
@@ -53,3 +67,18 @@ Neither student_tests nor CMakeLists mentions either macro.
 
 AI assisted with implementation and testing; all requirements and decisions
 were reviewed against the repository specification.
+
+## Pair programming log
+
+- **Partner:** Evan Cedar.
+- **Session 1:** November 2, 2026, 2:15 PM-2:45 PM, on Manan Sharma's code,
+  working on the Unix-domain socket server, length-prefixed wire protocol,
+  remote-document GUI handoff, and shutdown. Roles were swapped at 2:30 PM.
+- **Navigator contribution by Manan:** identified that partial socket reads
+  required exactly consuming the declared payload length and suggested
+  preserving the GUI-thread-only workspace mutation boundary.
+- **Navigator contribution by Evan:** suggested checking server readiness and
+  keeping socket cancellation separate from corpus-build cancellation.
+- **Interaction that worked best:** alternating short implementation passes
+  with immediate protocol and lifecycle review kept each person focused on both
+  correctness and the behavior of the other role.

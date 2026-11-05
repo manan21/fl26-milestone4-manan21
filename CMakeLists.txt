@@ -50,6 +50,9 @@ add_executable(ai_workspace_m4 src/main.cpp)
 target_link_libraries(ai_workspace_m4 PRIVATE aiws_app)
 target_compile_options(ai_workspace_m4 PRIVATE -Wall -Wextra -Wpedantic)
 
+add_executable(aiws_send tools/aiws_send.cpp)
+target_compile_options(aiws_send PRIVATE -Wall -Wextra -Wpedantic)
+
 enable_testing()
 add_executable(student_tests tests/student_tests.cpp)
 target_link_libraries(student_tests PRIVATE aiws_app Qt6::Test)
