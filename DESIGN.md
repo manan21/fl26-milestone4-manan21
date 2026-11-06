@@ -71,14 +71,13 @@ were reviewed against the repository specification.
 ## Pair programming log
 
 - **Partner:** Evan Cedar.
-- **Session 1:** November 2, 2026, 2:15 PM-2:45 PM, on Manan Sharma's code,
-  working on the Unix-domain socket server, length-prefixed wire protocol,
-  remote-document GUI handoff, and shutdown. Roles were swapped at 2:30 PM.
-- **Navigator contribution by Manan:** identified that partial socket reads
-  required exactly consuming the declared payload length and suggested
-  preserving the GUI-thread-only workspace mutation boundary.
+- **Session 1:** November 2, 2026, 2:15 PM-3:15 PM, working on Manan Sharma's code.
+  We worked on the socket server, message format, remote document updates, and
+  shutdown. We switched roles at 2:45 PM.
+- **Navigator contribution by Manan:** noticed that socket messages may arrive
+  in parts and suggested reading the full message before replying. He also
+  suggested keeping workspace changes on the GUI thread.
 - **Navigator contribution by Evan:** suggested checking server readiness and
   keeping socket cancellation separate from corpus-build cancellation.
-- **Interaction that worked best:** alternating short implementation passes
-  with immediate protocol and lifecycle review kept each person focused on both
-  correctness and the behavior of the other role.
+- **Interaction that worked best:** working in short turns, then reviewing the
+  socket code and shutdown logic together.
