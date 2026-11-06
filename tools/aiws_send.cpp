@@ -3,7 +3,6 @@
 #include <chrono>
 #include <cstring>
 #include <cstdint>
-#include <fcntl.h>
 #include <iostream>
 #include <limits.h>
 #include <poll.h>
@@ -21,18 +20,6 @@ std::string default_socket() {
         return "/tmp/aiws-" + std::string(user) + ".sock";
     }
     return "/tmp/aiws-" + std::to_string(geteuid()) + ".sock";
-}
-
-bool set_nonblocking(int fd) {
-    const int flags = fcntl(fd, F_GETFL, 0);
-    return flags >= 0 && fcntl(fd, F_SETFL, flags | O_NONBLOCK) >= 0;
-}
-
-bool wait_writable(int fd, int timeout_ms) {
-    pollfd poll_fd{fd, POLLOUT, 0};
-    return poll(&poll_fd, 1, timeout_ms) == 1 &&
-           (poll_fd.revents & POLLOUT) != 0 &&
-           (poll_fd.revents & (POLLERR | POLLHUP | POLLNVAL)) == 0;
 }
 
 bool send_all(int fd, const char* data, std::size_t length) {
@@ -100,11 +87,6 @@ int main(int argc, char** argv) {
 
     const int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) return 2;
-    if (!set_nonblocking(fd)) {
-        close(fd);
-        return 2;
-    }
-
     sockaddr_un address{};
     address.sun_family = AF_UNIX;
     if (socket_path.size() >= sizeof(address.sun_path)) {
@@ -112,20 +94,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     std::memcpy(address.sun_path, socket_path.data(), socket_path.size());
-    if (connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0 &&
-        errno != EINPROGRESS) {
-        close(fd);
-        return 2;
-    }
-    if (!wait_writable(fd, 2000)) {
-        close(fd);
-        return 2;
-    }
-    int socket_error = 0;
-    socklen_t socket_error_size = sizeof(socket_error);
-    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error,
-                   &socket_error_size) < 0 ||
-        socket_error != 0) {
+    if (connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0) {
         close(fd);
         return 2;
     }
