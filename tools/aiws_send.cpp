@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstring>
 #include <cstdint>
+#include <fcntl.h>
 #include <iostream>
 #include <limits.h>
 #include <poll.h>
@@ -22,6 +23,11 @@ std::string default_socket() {
     return "/tmp/aiws-" + std::to_string(geteuid()) + ".sock";
 }
 
+bool set_nonblocking(int fd) {
+    const int flags = fcntl(fd, F_GETFL, 0);
+    return flags >= 0 && fcntl(fd, F_SETFL, flags | O_NONBLOCK) >= 0;
+}
+
 bool send_all(int fd, const char* data, std::size_t length) {
     while (length > 0) {
         const ssize_t sent = send(fd, data, length, MSG_NOSIGNAL);
@@ -32,7 +38,7 @@ bool send_all(int fd, const char* data, std::size_t length) {
             continue;
         } else if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             pollfd poll_fd{fd, POLLOUT, 0};
-            if (poll(&poll_fd, 1, 1000) != 1) return false;
+            if (poll(&poll_fd, 1, 1500) != 1) return false;
         } else {
             return false;
         }
@@ -87,6 +93,10 @@ int main(int argc, char** argv) {
 
     const int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) return 2;
+    if (!set_nonblocking(fd)) {
+        close(fd);
+        return 2;
+    }
     sockaddr_un address{};
     address.sun_family = AF_UNIX;
     if (socket_path.size() >= sizeof(address.sun_path)) {
@@ -94,9 +104,26 @@ int main(int argc, char** argv) {
         return 2;
     }
     std::memcpy(address.sun_path, socket_path.data(), socket_path.size());
-    if (connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0) {
+    if (connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0 &&
+        errno != EINPROGRESS) {
         close(fd);
         return 2;
+    }
+    if (errno == EINPROGRESS) {
+        pollfd poll_fd{fd, POLLOUT, 0};
+        if (poll(&poll_fd, 1, 1500) != 1 ||
+            (poll_fd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+            close(fd);
+            return 2;
+        }
+        int socket_error = 0;
+        socklen_t socket_error_size = sizeof(socket_error);
+        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error,
+                       &socket_error_size) < 0 ||
+            socket_error != 0) {
+            close(fd);
+            return 2;
+        }
     }
 
     std::string payload = std::string("ADD ") + resolved_path;
@@ -108,7 +135,7 @@ int main(int argc, char** argv) {
     }
 
     char response_header[2] = {};
-    if (!receive_exact(fd, response_header, 2, 5000)) {
+    if (!receive_exact(fd, response_header, 2, 1500)) {
         close(fd);
         return 2;
     }
