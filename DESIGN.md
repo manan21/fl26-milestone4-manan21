@@ -2,11 +2,15 @@
 
 ## M4 fixes
 
-CR-1 now binds before reporting server startup success, reads partial requests
-with a deadline, and can stop while a client is mid-request. `aiws_send` checks
-the result of nonblocking `connect` rather than stale `errno`. M4 cancellation
-could finish the current delay but still chunk every remaining document; the
-M5 worker now abandons the build when its request is invalidated.
+`MainWindow::start_ipc_server`, `stop_ipc_server`, and `receive_exact` changed:
+startup binds synchronously, reads partial frames to a deadline, and can
+interrupt an active client. `aiws_send::main` now checks `connect`'s return
+value. The listener descriptor is thread-local, so `ipc_listen_socket_` was
+removed. `add_remote_document` and the wire format (4-byte big-endian length;
+`ADD ` plus absolute UTF-8 path; `OK`/`ERR`) stayed unchanged to preserve queued
+GUI mutation and immediate replies; `add_document_file` retains its public API.
+M4 cancellation skipped the delay but continued chunking; M5 aborts obsolete
+work.
 
 ## Threads and shared data
 
@@ -55,6 +59,9 @@ throws `BuildCancelled`, so the old result is discarded;
 `reset_cancels_old_build_before_next_build` checks that the new build starts
 promptly. `AIWS_FAULT_SILENT_SHUTDOWN` is in `stop_worker`;
 `idle_shutdown_completes` checks shutdown in a child process.
+`gui_remains_responsive_during_build`, `close_stops_active_build`,
+`repeated_builds_complete`, `remote_add_handles_utf8_and_partial_writes`, and
+`stopping_server_unblocks_partial_request` cover the M4 test gaps.
 
 ## AI use
 
