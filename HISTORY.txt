@@ -1,43 +1,44 @@
-﻿commit ec9158ec2eba7c8cf4b39f93bf1ff4e8c9d67395
+﻿commit 1600c990ca7aa831b31100e23e0c9644548b9414
+Author: manansharma <manansharma@vt.edu>
+Date:   2026-11-22 16:59:08 -0600
+
+    Refresh history for CR-1 documentation update
+
+ HISTORY.txt | 24 +++++++++++++++++++++++-
+ 1 file changed, 23 insertions(+), 1 deletion(-)
+
+commit b721e58fe2ef75685490199f1f7ea4d631c42cc4
 Author: manansharma <manansharma@vt.edu>
 Date:   2026-11-22 16:59:03 -0600
 
     Clarify M4 CR-1 remediation in design record
 
-    Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
-
  DESIGN.md | 17 ++++++++++++-----
  1 file changed, 12 insertions(+), 5 deletions(-)
 
-commit 7d408f6056e8cc2070184f5811e08afb2f067e26
+commit bbde4953d1c6650e0844ca32921c310c792cd773
 Author: manansharma <manansharma@vt.edu>
 Date:   2026-11-22 16:55:30 -0600
 
     Normalize generated history output
 
-    Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
-
  HISTORY.txt | 15 +++++++++++++--
  1 file changed, 13 insertions(+), 2 deletions(-)
 
-commit 6040af8ac553660da201150464f33178d61d1be0
+commit fcc557f7d00d101a3fe884b16e45bd2bd7636219
 Author: manansharma <manansharma@vt.edu>
 Date:   2026-11-22 16:55:12 -0600
 
     Refresh project history for M5
 
-    Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
-
  HISTORY.txt | 59 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++---
  1 file changed, 56 insertions(+), 3 deletions(-)
 
-commit 2fe1ac059e1aa3c156b1c304aedbb37e941ce4f6
+commit be91c271d3c9efa62b1c95939a3b01025e1bc567
 Author: manansharma <manansharma@vt.edu>
 Date:   2026-11-22 16:54:45 -0600
 
     Implement M5 synchronized corpus lifecycle
-
-    Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
 
  CMakeLists.txt                   |  11 +-
  DESIGN.md                        | 139 +++----
