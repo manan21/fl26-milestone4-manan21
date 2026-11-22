@@ -1,9 +1,20 @@
-﻿commit 2fe1ac059e1aa3c156b1c304aedbb37e941ce4f6
+﻿commit 6040af8ac553660da201150464f33178d61d1be0
+Author: manansharma <manansharma@vt.edu>
+Date:   2026-11-22 16:55:12 -0600
+
+    Refresh project history for M5
+
+    Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+
+ HISTORY.txt | 59 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 56 insertions(+), 3 deletions(-)
+
+commit 2fe1ac059e1aa3c156b1c304aedbb37e941ce4f6
 Author: manansharma <manansharma@vt.edu>
 Date:   2026-11-22 16:54:45 -0600
 
     Implement M5 synchronized corpus lifecycle
-    
+
     Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
 
  CMakeLists.txt                   |  11 +-
