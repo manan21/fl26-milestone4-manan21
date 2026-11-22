@@ -1,11 +1,64 @@
-﻿commit 0c6b398570c134d96d159f868e7aef35890c3d55
+﻿commit 2fe1ac059e1aa3c156b1c304aedbb37e941ce4f6
+Author: manansharma <manansharma@vt.edu>
+Date:   2026-11-22 16:54:45 -0600
+
+    Implement M5 synchronized corpus lifecycle
+    
+    Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+
+ CMakeLists.txt                   |  11 +-
+ DESIGN.md                        | 139 +++----
+ VIDEO.md                         |   3 +
+ include/aiws/gui/main_window.hpp |  81 ++--
+ src/main_window.cpp              | 832 ++++++++++++++++++++++++++++-----------
+ tests/student_tests.cpp          | 283 ++++++++++++-
+ tools/aiws_send.cpp              |   7 +-
+ 7 files changed, 998 insertions(+), 358 deletions(-)
+
+commit cdc136d24217e78a20c0d0124ea372c8d5c2e1b1
+Author: manansharma <manansharma@vt.edu>
+Date:   2026-11-06 10:56:49 -0500
+
+    Bound CR-1 communication timeout
+
+ tools/aiws_send.cpp | 33 ++++++++++++++++++++++++++++++---
+ 1 file changed, 30 insertions(+), 3 deletions(-)
+
+commit 27369c7a49a490f96791f3933cae134f9f275d79
+Author: manansharma <manansharma@vt.edu>
+Date:   2026-11-06 10:51:21 -0500
+
+    Fix CR-1 unreachable socket handling
+
+ tools/aiws_send.cpp | 33 +--------------------------------
+ 1 file changed, 1 insertion(+), 32 deletions(-)
+
+commit 5c563433b5685c67cfa3ca12d416b131988c7f0b
+Author: manansharma <manansharma@vt.edu>
+Date:   2026-11-06 10:43:42 -0500
+
+    Update M4 pair programming log
+
+ DESIGN.md | 17 ++++++++---------
+ 1 file changed, 8 insertions(+), 9 deletions(-)
+
+commit acc07696f95ce0e8eec42e6e3a49d064e80c61fd
+Author: manansharma <manansharma@vt.edu>
+Date:   2026-11-06 10:42:45 -0500
+
+    Add AI assistance disclosure
+
+ AI_LOG.md | 63 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 63 insertions(+)
+
+commit fa5aa5f5aeeedf2a8d6ea24077848bb958fdbc25
 Author: manansharma <manansharma@vt.edu>
 Date:   2026-11-05 14:15:02 -0500
 
     Update repository history for CR1
 
- HISTORY.txt | Bin 2766 -> 7430 bytes
- 1 file changed, 0 insertions(+), 0 deletions(-)
+ HISTORY.txt | 34 +++++++++++++++++++++++++++++++++-
+ 1 file changed, 33 insertions(+), 1 deletion(-)
 
 commit 867315fedac7d366911c7a802b5b9d2570eb1a6a
 Author: manansharma <manansharma@vt.edu>
