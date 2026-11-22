@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(ai_workspace_m4 LANGUAGES CXX)
+project(ai_workspace_m5 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -9,8 +9,7 @@ find_package(Threads REQUIRED)
 find_package(Qt6 REQUIRED COMPONENTS Widgets Test)
 set(CMAKE_AUTOMOC ON)
 
-# M4 starts from your own M3 project: copy your M3 src/ files here first.
-# Add your new M4 source files to the target where they belong.
+# M5 continues the student's M4 application and CR-1 implementation.
 
 add_library(aiws_m2
     src/document.cpp
@@ -46,9 +45,9 @@ target_include_directories(aiws_app PUBLIC include)
 target_link_libraries(aiws_app PUBLIC aiws_m2 Qt6::Widgets)
 target_compile_options(aiws_app PRIVATE -Wall -Wextra -Wpedantic)
 
-add_executable(ai_workspace_m4 src/main.cpp)
-target_link_libraries(ai_workspace_m4 PRIVATE aiws_app)
-target_compile_options(ai_workspace_m4 PRIVATE -Wall -Wextra -Wpedantic)
+add_executable(ai_workspace_m5 src/main.cpp)
+target_link_libraries(ai_workspace_m5 PRIVATE aiws_app)
+target_compile_options(ai_workspace_m5 PRIVATE -Wall -Wextra -Wpedantic)
 
 add_executable(aiws_send tools/aiws_send.cpp)
 target_compile_options(aiws_send PRIVATE -Wall -Wextra -Wpedantic)

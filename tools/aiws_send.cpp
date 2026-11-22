@@ -104,12 +104,13 @@ int main(int argc, char** argv) {
         return 2;
     }
     std::memcpy(address.sun_path, socket_path.data(), socket_path.size());
-    if (connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0 &&
-        errno != EINPROGRESS) {
+    const int connected =
+        connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address));
+    if (connected < 0 && errno != EINPROGRESS) {
         close(fd);
         return 2;
     }
-    if (errno == EINPROGRESS) {
+    if (connected < 0) {
         pollfd poll_fd{fd, POLLOUT, 0};
         if (poll(&poll_fd, 1, 1500) != 1 ||
             (poll_fd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {

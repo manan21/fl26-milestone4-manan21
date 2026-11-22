@@ -1,83 +1,62 @@
-# M4 Decision Record
+# M5 Design Record
 
-## Threads and ownership
+## M4 fixes
 
-`MainWindow` owns the GUI thread, live `Workspace`, published `ProcessingCore`,
-and one joinable `std::thread` build worker. The worker receives an immutable
-workspace copy and constructs a separate `ProcessingCore` from a delayed
-chunking strategy. Build completion is represented by a `std::future`; a
-25 ms Qt timer polls it on the GUI thread. Widgets and the published corpus are
-therefore touched only on the GUI thread. Exit requests cancellation, and the
-window destructor/join path joins every worker before clearing ownership.
+CR-1 now binds before reporting server startup success, reads partial requests
+with a deadline, and can stop while a client is mid-request. `aiws_send` checks
+the result of nonblocking `connect` rather than stale `errno`. M4 cancellation
+could finish the current delay but still chunk every remaining document; the
+M5 worker now abandons the build when its request is invalidated.
 
-The `BuildState::cancelled` shared atomic is the only application data mutable
-by both threads: the GUI writes it on cancellation and the worker reads it in
-delay intervals and before remaining documents. It is safe because
-`std::atomic<bool>` supplies its synchronization. The workspace snapshot,
-future/promise transfer, request revision, delay, result core, and error are
-accessed by one thread at a time; the standard library synchronizes promise
-completion with future readiness. No `ProcessingCore` or widget is shared.
+## Threads and shared data
 
-## Stale-build validity
+The GUI thread owns all widgets, the workspace, corpus states, and the published
+`ProcessingCore`. One persistent build worker waits for requests and builds only
+immutable workspace snapshots. The CR-1 server has a separate `std::thread`.
+The build worker and GUI share `pending_build_`, `build_generation_`,
+`worker_busy_`, and `worker_stopping_`, all protected by `build_mutex_`;
+`build_condition_` wakes the worker for requests, cancellation, and shutdown.
+Requests are moved under that mutex. Immutable `BuildCompletion` objects are
+transferred back using Qt's queued event delivery. The GUI and CR-1 thread share
+only atomic `ipc_stop_` and `ipc_client_socket_`. Socket paths, widgets, states,
+and workspace data are not shared.
 
-`MainWindow::add_document_file()` and Reset increment `workspace_revision_`.
-Each build records the revision and captures the workspace. Completion is
-accepted only when the recorded revision equals the current revision. Stale
-results are discarded in `MainWindow::poll_build_result()`, and the workspace
-is left needing a rebuild.
+## Corpus states
 
-## Changes since the checkpoint
+| State | Meaning / transitions |
+|---|---|
+| Empty | Add -> Needs Build; Build is ignored; Reset stays Empty. |
+| Needs Build | Build -> Building; Add stays Needs Build; Reset -> Empty. |
+| Building | Success -> Current; failure -> Needs Build; Add -> Needs Build; Reset -> Empty; Build replaces the request; Exit -> Stopped. |
+| Current | Build -> Building; Add -> Needs Build; Reset -> Empty. |
+| Stopped | Worker joined; later events are ignored. |
 
-The checkpoint planned cancellation as current-document completion followed by
-joining; the implementation additionally cancels delay intervals in 10 ms
-steps. The completion mechanism is `std::future` plus a GUI timer rather than
-queued invocation, allowing the worker to remain wholly free of Qt objects.
+State objects are created, invoked, and destroyed on the GUI thread. For
+example, Add during a build first dispatches to
+`BuildingCorpusState::workspace_will_change`, which increments the generation
+and notifies the worker before the workspace mutates. After mutation,
+`workspace_changed` clears old outputs and changes state. `wait_for_build_step`
+throws `BuildCancelled`, so the old result is discarded;
+`NeedsBuildCorpusState` can then submit the next snapshot.
 
-## CR-1
+## Decisions and evidence
 
-`MainWindow::start_ipc_server()` owns the POSIX Unix-domain stream server on
-an independent `std::thread`. It reads requests, checks readability, replies,
-and queues the document mutation with `QMetaObject::invokeMethod`. The reply
-does not wait for GUI processing. The GUI mutates the workspace and increments
-`workspace_revision_`, so remote documents invalidate an in-progress build like
-local documents.
+1. Build during a build is allowed: `BuildingCorpusState::build_requested`
+   submits a newer generation, replacing any pending request and cancelling
+   the active one.
+2. A remote add is queued to `add_remote_document` on the GUI thread. It
+   follows the normal Add path, invalidates the corpus, and cancels the build.
+3. The smallest build handoff is one mutex-protected pending request, generation,
+   stopping/busy flags, and condition variable. The worker needs the generation
+   to reject stale work, the pending snapshot to build, and the stop signal to
+   exit; completion is immutable and queued back to the GUI.
 
-CR-1 wire protocol:
-
-1. Client sends a four-byte big-endian network-order `uint32_t` payload length.
-2. Payload bytes are exactly `ADD ` followed by an absolute UTF-8 path; spaces,
-   non-ASCII characters, and newline are payload bytes rather than delimiters.
-3. Server reads exactly the length (including across partial writes), then replies
-   with bytes `OK` for a readable file or `ERR...` for rejection.
-
-The server uses a Unix-domain stream socket and 50 ms shutdown polling.
-`stop_ipc_server()` sets cancellation, shuts down the listener, joins the
-server thread, and unlinks the socket.
-
-## Fault switches
-
-- `AIWS_FAULT_ACCEPT_STALE` disables the revision comparison at
-  `MainWindow::poll_build_result()`; `stale_completion_is_not_published()` catches it.
-- `AIWS_FAULT_LOSE_FAILURE` suppresses failure delivery in
-  `MainWindow::poll_build_result()`; `build_failure_is_reported()` catches it.
-
-Neither student_tests nor CMakeLists mentions either macro.
+`AIWS_FAULT_NO_CANCEL` is in `wait_for_build_step`; the reset-and-rebuild test
+`reset_cancels_old_build_before_next_build` checks that the new build starts
+promptly. `AIWS_FAULT_SILENT_SHUTDOWN` is in `stop_worker`;
+`idle_shutdown_completes` checks shutdown in a child process.
 
 ## AI use
 
-AI assisted with implementation and testing; all requirements and decisions
-were reviewed against the repository specification.
-
-## Pair programming log
-
-- **Partner:** Evan Cedar.
-- **Session 1:** November 2, 2026, 2:15 PM-3:15 PM, working on Manan Sharma's code.
-  We worked on the socket server, message format, remote document updates, and
-  shutdown. We switched roles at 2:45 PM.
-- **Navigator contribution by Manan:** noticed that socket messages may arrive
-  in parts and suggested reading the full message before replying. He also
-  suggested keeping workspace changes on the GUI thread.
-- **Navigator contribution by Evan:** suggested checking server readiness and
-  keeping socket cancellation separate from corpus-build cancellation.
-- **Interaction that worked best:** working in short turns, then reviewing the
-  socket code and shutdown logic together.
+Copilot assisted with code changes and tests; I reviewed the design and behavior
+against the specification.

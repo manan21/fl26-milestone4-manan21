@@ -8,31 +8,33 @@
 #include "aiws/context_builder.hpp"
 #include "aiws/retrieval_engine.hpp"
 
+#include <QByteArray>
+#include <QCloseEvent>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMessageBox>
+#include <QMetaObject>
 #include <QPushButton>
-#include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
-#include <QCloseEvent>
 
-#include <atomic>
+#include <algorithm>
+#include <arpa/inet.h>
 #include <chrono>
 #include <cstdint>
 #include <exception>
-#include <future>
+#include <functional>
 #include <memory>
 #include <thread>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <cerrno>
 #include <cstring>
-#include <fcntl.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -42,38 +44,287 @@ namespace aiws::gui {
 
 namespace {
 
+class BuildCancelled final : public std::exception {};
+
 class DelayedChunker final : public ChunkingStrategy {
 public:
-    DelayedChunker(std::shared_ptr<std::atomic<bool>> cancelled,
-                   int delay_ms)
+    DelayedChunker(std::function<void(int)> wait_for_step, int delay_ms)
         : chunker_(std::make_unique<Chunker>()),
-          cancelled_(std::move(cancelled)),
+          wait_for_step_(std::move(wait_for_step)),
           delay_ms_(delay_ms) {}
 
     std::vector<Chunk> chunk(const Document& document,
                              std::size_t document_order) const override {
+        wait_for_step_(0);
         auto chunks = chunker_->chunk(document, document_order);
-        if (delay_ms_ <= 0 || cancelled_->load()) {
-            return chunks;
-        }
-
-        const auto end =
-            std::chrono::steady_clock::now() +
-            std::chrono::milliseconds(delay_ms_);
-        while (!cancelled_->load() &&
-               std::chrono::steady_clock::now() < end) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
+        wait_for_step_(delay_ms_);
         return chunks;
     }
 
 private:
     std::unique_ptr<Chunker> chunker_;
-    std::shared_ptr<std::atomic<bool>> cancelled_;
+    std::function<void(int)> wait_for_step_;
     int delay_ms_;
 };
 
+bool receive_exact(int socket_fd, char* data, std::size_t length,
+                   const std::atomic<bool>& stopping) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (length > 0) {
+        if (stopping.load()) {
+            return false;
+        }
+        const auto remaining = std::chrono::duration_cast<
+            std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+        if (remaining.count() <= 0) {
+            return false;
+        }
+        pollfd ready{socket_fd, POLLIN, 0};
+        const int timeout = static_cast<int>(
+            std::min<std::int64_t>(remaining.count(), 50));
+        const int polled = poll(&ready, 1, timeout);
+        if (polled == 0) {
+            continue;
+        }
+        if (polled < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return false;
+        }
+        const ssize_t count = recv(socket_fd, data, length, 0);
+        if (count > 0) {
+            data += count;
+            length -= static_cast<std::size_t>(count);
+        } else if (count < 0 && errno == EINTR) {
+            continue;
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool send_all(int socket_fd, const char* data, std::size_t length) {
+    while (length > 0) {
+        const ssize_t count = send(socket_fd, data, length, MSG_NOSIGNAL);
+        if (count > 0) {
+            data += count;
+            length -= static_cast<std::size_t>(count);
+        } else if (count < 0 && errno == EINTR) {
+            continue;
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
 }  // namespace
+
+struct BuildCompletion {
+    std::uint64_t request_id;
+    std::uint64_t revision;
+    std::shared_ptr<const ProcessingCore> core;
+    std::string error;
+};
+
+class CorpusState {
+public:
+    virtual ~CorpusState() = default;
+    virtual void build_requested(MainWindow& window) = 0;
+    virtual void workspace_will_change(MainWindow& window) = 0;
+    virtual void workspace_changed(MainWindow& window) = 0;
+    virtual void reset_requested(MainWindow& window) = 0;
+    virtual void build_finished(
+        MainWindow& window,
+        const std::shared_ptr<const BuildCompletion>& completion) = 0;
+    virtual void exit_requested(MainWindow& window) = 0;
+    virtual bool is_building() const noexcept = 0;
+    virtual bool is_current() const noexcept = 0;
+};
+
+class EmptyCorpusState final : public CorpusState {
+public:
+    void build_requested(MainWindow&) override {}
+    void workspace_will_change(MainWindow& window) override;
+    void workspace_changed(MainWindow& window) override;
+    void reset_requested(MainWindow& window) override;
+    void build_finished(
+        MainWindow&,
+        const std::shared_ptr<const BuildCompletion>&) override {}
+    void exit_requested(MainWindow& window) override;
+    bool is_building() const noexcept override { return false; }
+    bool is_current() const noexcept override { return false; }
+};
+
+class NeedsBuildCorpusState final : public CorpusState {
+public:
+    void build_requested(MainWindow& window) override { window.begin_build(); }
+    void workspace_will_change(MainWindow& window) override;
+    void workspace_changed(MainWindow& window) override;
+    void reset_requested(MainWindow& window) override;
+    void build_finished(
+        MainWindow&,
+        const std::shared_ptr<const BuildCompletion>&) override {}
+    void exit_requested(MainWindow& window) override;
+    bool is_building() const noexcept override { return false; }
+    bool is_current() const noexcept override { return false; }
+};
+
+class BuildingCorpusState final : public CorpusState {
+public:
+    BuildingCorpusState(std::uint64_t request_id, std::uint64_t revision)
+        : request_id_(request_id), revision_(revision) {}
+
+    void build_requested(MainWindow& window) override { window.begin_build(); }
+    void workspace_will_change(MainWindow& window) override;
+    void workspace_changed(MainWindow& window) override;
+    void reset_requested(MainWindow& window) override;
+    void build_finished(
+        MainWindow& window,
+        const std::shared_ptr<const BuildCompletion>& completion) override;
+    void exit_requested(MainWindow& window) override;
+    bool is_building() const noexcept override { return true; }
+    bool is_current() const noexcept override { return false; }
+
+private:
+    std::uint64_t request_id_;
+    std::uint64_t revision_;
+};
+
+class CurrentCorpusState final : public CorpusState {
+public:
+    void build_requested(MainWindow& window) override { window.begin_build(); }
+    void workspace_will_change(MainWindow& window) override;
+    void workspace_changed(MainWindow& window) override;
+    void reset_requested(MainWindow& window) override;
+    void build_finished(
+        MainWindow&,
+        const std::shared_ptr<const BuildCompletion>&) override {}
+    void exit_requested(MainWindow& window) override;
+    bool is_building() const noexcept override { return false; }
+    bool is_current() const noexcept override { return true; }
+};
+
+class StoppedCorpusState final : public CorpusState {
+public:
+    void build_requested(MainWindow&) override {}
+    void workspace_will_change(MainWindow&) override {}
+    void workspace_changed(MainWindow&) override {}
+    void reset_requested(MainWindow&) override {}
+    void build_finished(
+        MainWindow&,
+        const std::shared_ptr<const BuildCompletion>&) override {}
+    void exit_requested(MainWindow&) override {}
+    bool is_building() const noexcept override { return false; }
+    bool is_current() const noexcept override { return false; }
+};
+
+void EmptyCorpusState::workspace_will_change(MainWindow& window) {
+    window.cancel_build();
+}
+
+void EmptyCorpusState::workspace_changed(MainWindow& window) {
+    window.invalidate_workspace();
+    if (window.workspace_.documents().empty()) {
+        window.transition_to(std::make_shared<EmptyCorpusState>());
+    } else {
+        window.transition_to(std::make_shared<NeedsBuildCorpusState>());
+    }
+}
+
+void EmptyCorpusState::reset_requested(MainWindow& window) {
+    window.reset_state();
+}
+
+void EmptyCorpusState::exit_requested(MainWindow& window) {
+    window.stop_worker();
+    window.transition_to(std::make_shared<StoppedCorpusState>());
+}
+
+void NeedsBuildCorpusState::workspace_will_change(MainWindow& window) {
+    window.cancel_build();
+}
+
+void NeedsBuildCorpusState::workspace_changed(MainWindow& window) {
+    window.invalidate_workspace();
+    if (window.workspace_.documents().empty()) {
+        window.transition_to(std::make_shared<EmptyCorpusState>());
+    } else {
+        window.transition_to(std::make_shared<NeedsBuildCorpusState>());
+    }
+}
+
+void NeedsBuildCorpusState::reset_requested(MainWindow& window) {
+    window.reset_state();
+}
+
+void NeedsBuildCorpusState::exit_requested(MainWindow& window) {
+    window.stop_worker();
+    window.transition_to(std::make_shared<StoppedCorpusState>());
+}
+
+void BuildingCorpusState::workspace_will_change(MainWindow& window) {
+    window.cancel_build();
+}
+
+void BuildingCorpusState::workspace_changed(MainWindow& window) {
+    window.invalidate_workspace();
+    if (window.workspace_.documents().empty()) {
+        window.transition_to(std::make_shared<EmptyCorpusState>());
+    } else {
+        window.transition_to(std::make_shared<NeedsBuildCorpusState>());
+    }
+}
+
+void BuildingCorpusState::reset_requested(MainWindow& window) {
+    window.reset_state();
+}
+
+void BuildingCorpusState::build_finished(
+    MainWindow& window,
+    const std::shared_ptr<const BuildCompletion>& completion) {
+    if (completion->request_id != request_id_ ||
+        completion->revision != revision_) {
+        return;
+    }
+    if (completion->core) {
+        window.publish_build(completion->core);
+        window.transition_to(std::make_shared<CurrentCorpusState>());
+    } else {
+        window.report_build_failure(completion->error);
+        window.transition_to(std::make_shared<NeedsBuildCorpusState>());
+    }
+}
+
+void BuildingCorpusState::exit_requested(MainWindow& window) {
+    window.stop_worker();
+    window.transition_to(std::make_shared<StoppedCorpusState>());
+}
+
+void CurrentCorpusState::workspace_will_change(MainWindow& window) {
+    window.cancel_build();
+}
+
+void CurrentCorpusState::workspace_changed(MainWindow& window) {
+    window.invalidate_workspace();
+    if (window.workspace_.documents().empty()) {
+        window.transition_to(std::make_shared<EmptyCorpusState>());
+    } else {
+        window.transition_to(std::make_shared<NeedsBuildCorpusState>());
+    }
+}
+
+void CurrentCorpusState::reset_requested(MainWindow& window) {
+    window.reset_state();
+}
+
+void CurrentCorpusState::exit_requested(MainWindow& window) {
+    window.stop_worker();
+    window.transition_to(std::make_shared<StoppedCorpusState>());
+}
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowTitle(tr("AI Workspace"));
@@ -144,18 +395,15 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(exit_button_, &QPushButton::clicked,
             this, &MainWindow::exit_application);
 
-    build_timer_ = new QTimer(this);
-    build_timer_->setInterval(25);
-    connect(build_timer_, &QTimer::timeout,
-            this, &MainWindow::poll_build_result);
-
+    corpus_state_ = std::make_shared<EmptyCorpusState>();
     update_action_states();
+    build_worker_ = std::thread([this] { worker_loop(); });
 }
 
 MainWindow::~MainWindow() {
-    stop_build();
-    join_build();
     stop_ipc_server();
+    auto state = corpus_state_;
+    state->exit_requested(*this);
 }
 
 void MainWindow::set_exit_callback(ExitCallback callback) noexcept {
@@ -167,87 +415,133 @@ void MainWindow::set_build_delay_ms(int ms_per_document) noexcept {
 }
 
 bool MainWindow::start_ipc_server(const QString& socket_path) {
-    ipc_socket_path_ = socket_path;
-    ipc_stop_ = std::make_shared<std::atomic<bool>>(false);
-    ipc_thread_ = std::thread([this, socket_path = socket_path.toStdString(),
-                               stop = ipc_stop_] {
-        const int listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-        if (listen_fd < 0) return;
-        sockaddr_un address{};
-        address.sun_family = AF_UNIX;
-        if (socket_path.size() >= sizeof(address.sun_path)) {
-            ::close(listen_fd);
-            return;
-        }
-        std::memcpy(address.sun_path, socket_path.data(), socket_path.size());
-        unlink(socket_path.c_str());
-        if (bind(listen_fd, reinterpret_cast<sockaddr*>(&address),
-                 sizeof(address)) < 0 ||
-            listen(listen_fd, 16) < 0) {
-            ::close(listen_fd);
-            return;
-        }
-        ipc_listen_socket_ = listen_fd;
+    if (ipc_thread_.joinable()) {
+        return false;
+    }
+    sockaddr_un address{};
+    const QByteArray encoded_path = socket_path.toUtf8();
+    if (encoded_path.isEmpty() ||
+        static_cast<std::size_t>(encoded_path.size()) >=
+            sizeof(address.sun_path)) {
+        return false;
+    }
 
-        pollfd poll_fd{listen_fd, POLLIN, 0};
-        while (!stop->load()) {
-            if (poll(&poll_fd, 1, 50) <= 0) continue;
-            sockaddr_storage unused{};
-            socklen_t unused_length = sizeof(unused);
-            const int client = accept4(listen_fd, reinterpret_cast<sockaddr*>(&unused),
-                                       &unused_length, SOCK_CLOEXEC);
-            if (client < 0) continue;
+    address.sun_family = AF_UNIX;
+    std::memcpy(address.sun_path, encoded_path.constData(),
+                static_cast<std::size_t>(encoded_path.size()));
+    const std::string path(encoded_path.constData(),
+                           static_cast<std::size_t>(encoded_path.size()));
 
-            std::uint32_t length_network = 0;
-            const ssize_t header = recv(client, &length_network, 4, MSG_WAITALL);
-            if (header == 4) {
-                const std::uint32_t length =
-                    __builtin_bswap32(length_network);
-                std::string payload(length, '\0');
-                const ssize_t payload_bytes =
-                    length <= 16u * 1024u * 1024u
-                        ? recv(client, payload.data(), length, MSG_WAITALL)
-                        : -1;
-                std::string response;
-                if (payload_bytes >= 0 &&
-                    static_cast<std::size_t>(payload_bytes) == length &&
-                    length >= 4 && payload.compare(0, 4, "ADD ", 4) == 0) {
-                    const QString path =
-                        QString::fromUtf8(payload.data() + 4,
-                                          static_cast<int>(length - 4));
-                    QFile file(path);
-                    if (!file.open(QIODevice::ReadOnly)) {
-                        response = "ERR unreadable file";
-                    } else {
-                        file.close();
-                        response = "OK";
-                        QMetaObject::invokeMethod(
-                            this, "add_remote_document",
-                            Qt::QueuedConnection,
-                            Q_ARG(QString, path));
-                    }
-                } else {
-                    response = "ERR invalid request";
-                }
-                send(client, response.data(), response.size(), MSG_NOSIGNAL);
-            }
-            ::close(client);
-        }
+    const int listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (listen_fd < 0) {
+        return false;
+    }
+    unlink(path.c_str());
+    if (bind(listen_fd, reinterpret_cast<sockaddr*>(&address),
+             sizeof(address)) < 0 ||
+        listen(listen_fd, 16) < 0) {
+        const int error = errno;
         ::close(listen_fd);
-        ipc_listen_socket_ = -1;
-        unlink(socket_path.c_str());
-    });
+        unlink(path.c_str());
+        errno = error;
+        return false;
+    }
+
+    ipc_stop_.store(false);
+    ipc_socket_path_ = socket_path;
+    try {
+        ipc_thread_ = std::thread([this, listen_fd, path] {
+            pollfd poll_fd{listen_fd, POLLIN, 0};
+            while (!ipc_stop_.load()) {
+                const int ready = poll(&poll_fd, 1, 50);
+                if (ready == 0) {
+                    continue;
+                }
+                if (ready < 0) {
+                    if (errno == EINTR) {
+                        continue;
+                    }
+                    break;
+                }
+
+                sockaddr_storage peer{};
+                socklen_t peer_length = sizeof(peer);
+                const int client = accept4(
+                    listen_fd, reinterpret_cast<sockaddr*>(&peer),
+                    &peer_length, SOCK_CLOEXEC);
+                if (client < 0) {
+                    if (errno == EINTR || errno == EAGAIN ||
+                        errno == EWOULDBLOCK) {
+                        continue;
+                    }
+                    break;
+                }
+
+                ipc_client_socket_.store(client);
+                std::string response = "ERR invalid request";
+                std::uint32_t length_network = 0;
+                if (!ipc_stop_.load() &&
+                    receive_exact(client,
+                                  reinterpret_cast<char*>(&length_network),
+                                  sizeof(length_network), ipc_stop_)) {
+                    const std::uint32_t length = ntohl(length_network);
+                    if (length >= 4 && length <= 16u * 1024u * 1024u) {
+                        std::string payload(length, '\0');
+                        if (receive_exact(client, payload.data(), length,
+                                          ipc_stop_) &&
+                            payload.compare(0, 4, "ADD ", 4) == 0) {
+                            const QString remote_path = QString::fromUtf8(
+                                payload.data() + 4,
+                                static_cast<int>(length - 4));
+                            if (!remote_path.isEmpty() &&
+                                QFileInfo(remote_path).isAbsolute()) {
+                                QFile file(remote_path);
+                                if (!file.open(QIODevice::ReadOnly)) {
+                                    response = "ERR unreadable file";
+                                } else {
+                                    file.close();
+                                    const bool queued = QMetaObject::invokeMethod(
+                                        this, "add_remote_document",
+                                        Qt::QueuedConnection,
+                                        Q_ARG(QString, remote_path));
+                                    response = queued ? "OK"
+                                                      : "ERR application unavailable";
+                                }
+                            }
+                        }
+                    }
+                }
+                if (!ipc_stop_.load()) {
+                    send_all(client, response.data(), response.size());
+                }
+                ipc_client_socket_.store(-1);
+                ::close(client);
+            }
+            ::close(listen_fd);
+            unlink(path.c_str());
+        });
+    } catch (const std::system_error&) {
+        ipc_socket_path_.clear();
+        ipc_stop_.store(true);
+        ::close(listen_fd);
+        unlink(path.c_str());
+        return false;
+    }
     return true;
 }
 
 void MainWindow::stop_ipc_server() {
-    if (ipc_stop_) ipc_stop_->store(true);
-    if (ipc_listen_socket_ >= 0) shutdown(ipc_listen_socket_, SHUT_RDWR);
-    if (ipc_thread_.joinable()) ipc_thread_.join();
-    ipc_stop_.reset();
-    ipc_listen_socket_ = -1;
+    ipc_stop_.store(true);
+    const int client = ipc_client_socket_.load();
+    if (client >= 0) {
+        shutdown(client, SHUT_RDWR);
+    }
+    if (ipc_thread_.joinable()) {
+        ipc_thread_.join();
+    }
     if (!ipc_socket_path_.isEmpty()) {
         unlink(ipc_socket_path_.toStdString().c_str());
+        ipc_socket_path_.clear();
     }
 }
 
@@ -266,18 +560,27 @@ bool MainWindow::add_document_file(const QString& path) {
         return false;
     }
 
+    std::optional<aiws::Document> document;
     try {
-        workspace_.add_document(aiws::Document(
-            file_info.absoluteFilePath().toStdString(),
-            file_info.fileName().toStdString(),
-            QString::fromUtf8(contents).toStdString()));
-    } catch (...) {
+        document.emplace(file_info.absoluteFilePath().toStdString(),
+                         file_info.fileName().toStdString(),
+                         QString::fromUtf8(contents).toStdString());
+    } catch (const std::exception&) {
+        return false;
+    }
+
+    auto state = corpus_state_;
+    state->workspace_will_change(*this);
+    try {
+        workspace_.add_document(std::move(*document));
+    } catch (const std::exception&) {
+        state->workspace_changed(*this);
         return false;
     }
 
     workspace_widget_->add_document(file_info.fileName());
     ++workspace_revision_;
-    invalidate_corpus();
+    state->workspace_changed(*this);
     status_label_->setText(tr("Document added. Build the corpus to process it."));
     update_action_states();
     return true;
@@ -299,50 +602,8 @@ void MainWindow::add_document() {
 }
 
 void MainWindow::build_corpus() {
-    if (workspace_.documents().empty() || build_state_) {
-        return;
-    }
-
-    clear_processing_outputs();
-    corpus_current_ = false;
-    workspace_widget_->set_corpus_status(tr("Corpus: Building..."));
-    status_label_->setText(tr("Building corpus..."));
-
-    Workspace snapshot;
-    for (const auto& document : workspace_.documents()) {
-        snapshot.add_document(document);
-    }
-
-    build_state_ = std::make_unique<BuildState>();
-    build_state_->revision = workspace_revision_;
-    build_state_->cancelled = std::make_shared<std::atomic<bool>>(false);
-    std::promise<BuildResult> promise;
-    build_state_->result = promise.get_future();
-
-    const int delay_ms = build_delay_ms_;
-    auto cancelled = build_state_->cancelled;
-    build_state_->worker = std::thread(
-        [snapshot = std::move(snapshot), delay_ms, cancelled,
-         promise = std::move(promise)]() mutable {
-            BuildResult result;
-            if (cancelled->load()) {
-                promise.set_value(std::move(result));
-                return;
-            }
-            try {
-                auto core = std::make_unique<ProcessingCore>(
-                    std::make_unique<DelayedChunker>(cancelled, delay_ms),
-                    std::make_unique<RetrievalEngine>(),
-                    std::make_unique<ContextBuilder>());
-                core->rebuild(snapshot);
-                result.core = std::move(core);
-            } catch (const std::exception& error) {
-                result.error = error.what();
-            }
-            promise.set_value(std::move(result));
-        });
-    build_timer_->start();
-    update_action_states();
+    auto state = corpus_state_;
+    state->build_requested(*this);
 }
 
 void MainWindow::document_selected(int row) {
@@ -358,12 +619,12 @@ void MainWindow::document_selected(int row) {
 }
 
 void MainWindow::search_requested(const QString& query, int k) {
-    if (!corpus_current_ || query.trimmed().isEmpty()) {
+    if (!corpus_state_->is_current() || query.trimmed().isEmpty()) {
         return;
     }
 
     try {
-        auto results = processing_core_.search(query.toStdString(), k);
+        auto results = processing_core_->search(query.toStdString(), k);
         search_widget_->set_results(std::move(results));
         context_widget_->clear_context();
         status_label_->setText(tr("Search completed."));
@@ -381,12 +642,12 @@ void MainWindow::query_changed(const QString& query) {
 }
 
 void MainWindow::build_context_requested(int token_budget) {
-    if (!corpus_current_ || !search_widget_->has_query()) {
+    if (!corpus_state_->is_current() || !search_widget_->has_query()) {
         return;
     }
 
     try {
-        context_widget_->set_context(processing_core_.build_context(
+        context_widget_->set_context(processing_core_->build_context(
             search_widget_->query().toStdString(),
             search_widget_->result_count(),
             static_cast<std::size_t>(token_budget)));
@@ -412,18 +673,18 @@ void MainWindow::source_document_requested(const QString& document_id) {
 void MainWindow::term_inspection_requested(const QString& term,
                                            const QString& chunk_id) {
     const QString effective_term = term.trimmed();
-    if (!corpus_current_ || effective_term.isEmpty()) {
+    if (!corpus_state_->is_current() || effective_term.isEmpty()) {
         return;
     }
 
     try {
         const std::size_t document_frequency =
-            processing_core_.document_frequency(effective_term.toStdString());
+            processing_core_->document_frequency(effective_term.toStdString());
         const bool has_chunk_frequency = !chunk_id.isEmpty();
         const std::size_t chunk_frequency =
             has_chunk_frequency
-                ? processing_core_.term_frequency(effective_term.toStdString(),
-                                                  chunk_id.toStdString())
+                ? processing_core_->term_frequency(effective_term.toStdString(),
+                                                   chunk_id.toStdString())
                 : 0;
         term_inspector_widget_->set_statistics(
             document_frequency, has_chunk_frequency, chunk_frequency);
@@ -436,10 +697,10 @@ void MainWindow::term_inspection_requested(const QString& term,
 }
 
 void MainWindow::reset_application() {
+    auto state = corpus_state_;
+    state->reset_requested(*this);
     workspace_.clear();
     ++workspace_revision_;
-    stop_build();
-    corpus_current_ = false;
     Resettable* resettable_components[] = {
         workspace_widget_, search_widget_, term_inspector_widget_, context_widget_};
     for (Resettable* component : resettable_components) {
@@ -456,87 +717,216 @@ void MainWindow::exit_application() {
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
-        stop_build();
-        join_build();
-        QMainWindow::closeEvent(event);
+    stop_ipc_server();
+    auto state = corpus_state_;
+    state->exit_requested(*this);
+    QMainWindow::closeEvent(event);
 }
 
-void MainWindow::stop_build() {
-        if (build_state_) {
-            build_state_->cancelled->store(true);
-        }
-}
-
-void MainWindow::join_build() {
-        if (build_state_ && build_state_->worker.joinable()) {
-            build_state_->worker.join();
-        }
-        build_state_.reset();
-        if (build_timer_ != nullptr) {
-            build_timer_->stop();
-        }
-}
-
-void MainWindow::poll_build_result() {
-        if (!build_state_ || build_state_->worker.joinable() == false ||
-            build_state_->result.wait_for(std::chrono::seconds(0)) !=
-                std::future_status::ready) {
-            return;
-        }
-
-        build_state_->worker.join();
-        BuildResult result = build_state_->result.get();
-        const std::uint64_t revision = build_state_->revision;
-        build_state_.reset();
-        build_timer_->stop();
-
-    #ifdef AIWS_FAULT_ACCEPT_STALE
-        const bool revision_matches = true;
-    #else
-        const bool revision_matches = revision == workspace_revision_;
-    #endif
-
-    #ifdef AIWS_FAULT_LOSE_FAILURE
-        const bool report_failure = result.core != nullptr ||
-                                    result.error.empty();
-    #else
-        const bool report_failure = true;
-    #endif
-
-        if (!revision_matches) {
-            workspace_widget_->set_corpus_status(tr("Corpus: Needs rebuild"));
-            status_label_->setText(tr("Corpus changed. Build again to update."));
-        } else if (result.core == nullptr) {
-            if (report_failure) {
-                workspace_widget_->set_corpus_status(tr("Corpus: Needs rebuild"));
-                status_label_->setText(tr("Corpus build failed."));
+void MainWindow::worker_loop() {
+    while (true) {
+        BuildRequest request;
+        {
+            std::unique_lock<std::mutex> lock(build_mutex_);
+            build_condition_.wait(lock, [this] {
+                return worker_stopping_ || pending_build_.has_value();
+            });
+            if (worker_stopping_) {
+                return;
             }
-        } else {
-            processing_core_ = std::move(*result.core);
-            corpus_current_ = true;
-            workspace_widget_->set_corpus_status(
-                tr("Corpus: %1 chunks")
-                    .arg(static_cast<qulonglong>(processing_core_.chunk_count())));
-            status_label_->setText(tr("Corpus built."));
+            request = std::move(*pending_build_);
+            pending_build_.reset();
+            if (request.id != build_generation_) {
+                continue;
+            }
+            worker_busy_ = true;
         }
 
-        update_action_states();
+        std::shared_ptr<const ProcessingCore> core;
+        std::string error;
+        try {
+            auto next_core = std::make_shared<ProcessingCore>(
+                std::make_unique<DelayedChunker>(
+                    [this, request_id = request.id](int delay_ms) {
+                        wait_for_build_step(request_id, delay_ms);
+                    },
+                    request.delay_ms),
+                std::make_unique<RetrievalEngine>(),
+                std::make_unique<ContextBuilder>());
+            next_core->rebuild(request.snapshot);
+            core = std::move(next_core);
+        } catch (const BuildCancelled&) {
+            std::lock_guard<std::mutex> lock(build_mutex_);
+            worker_busy_ = false;
+            continue;
+        } catch (const std::exception& exception) {
+            error = exception.what();
+        }
+
+        bool still_current = false;
+        {
+            std::lock_guard<std::mutex> lock(build_mutex_);
+            worker_busy_ = false;
+            still_current = !worker_stopping_ &&
+                            request.id == build_generation_;
+        }
+        if (!still_current) {
+            continue;
+        }
+
+        auto completion = std::make_shared<const BuildCompletion>(
+            BuildCompletion{request.id, request.revision, std::move(core),
+                            std::move(error)});
+        QMetaObject::invokeMethod(
+            this,
+            [this, completion] { handle_build_completion(completion); },
+            Qt::QueuedConnection);
+    }
+}
+
+void MainWindow::stop_worker() {
+#ifdef AIWS_FAULT_SILENT_SHUTDOWN
+    bool worker_was_busy = false;
+#endif
+    {
+        std::lock_guard<std::mutex> lock(build_mutex_);
+#ifdef AIWS_FAULT_SILENT_SHUTDOWN
+        worker_was_busy = worker_busy_;
+#endif
+        worker_stopping_ = true;
+        ++build_generation_;
+        pending_build_.reset();
+    }
+#ifdef AIWS_FAULT_SILENT_SHUTDOWN
+    if (worker_was_busy) {
+        build_condition_.notify_all();
+    }
+#else
+    build_condition_.notify_all();
+#endif
+    if (build_worker_.joinable()) {
+        build_worker_.join();
+    }
+}
+
+void MainWindow::wait_for_build_step(std::uint64_t request_id, int delay_ms) {
+    std::unique_lock<std::mutex> lock(build_mutex_);
+    const auto cancelled = [this, request_id] {
+        if (worker_stopping_) {
+            return true;
+        }
+#ifdef AIWS_FAULT_NO_CANCEL
+        return false;
+#else
+        return request_id != build_generation_;
+#endif
+    };
+    if (cancelled()) {
+        throw BuildCancelled();
+    }
+    if (delay_ms > 0) {
+        build_condition_.wait_for(lock, std::chrono::milliseconds(delay_ms),
+                                  cancelled);
+    }
+    if (cancelled()) {
+        throw BuildCancelled();
+    }
+}
+
+std::uint64_t MainWindow::enqueue_build() {
+    Workspace snapshot;
+    for (const auto& document : workspace_.documents()) {
+        snapshot.add_document(document);
+    }
+    std::lock_guard<std::mutex> lock(build_mutex_);
+    if (worker_stopping_) {
+        return 0;
+    }
+    const std::uint64_t request_id = ++build_generation_;
+    pending_build_.emplace(
+        BuildRequest{request_id, workspace_revision_, std::move(snapshot),
+                     build_delay_ms_});
+    build_condition_.notify_one();
+    return request_id;
+}
+
+void MainWindow::cancel_build() {
+    {
+        std::lock_guard<std::mutex> lock(build_mutex_);
+        ++build_generation_;
+        pending_build_.reset();
+    }
+    build_condition_.notify_all();
+}
+
+void MainWindow::handle_build_completion(
+    std::shared_ptr<const BuildCompletion> completion) {
+    auto state = corpus_state_;
+    state->build_finished(*this, completion);
+}
+
+void MainWindow::begin_build() {
+    if (workspace_.documents().empty()) {
+        return;
+    }
+    clear_processing_outputs();
+    processing_core_.reset();
+    workspace_widget_->set_corpus_status(tr("Corpus: Building..."));
+    status_label_->setText(tr("Building corpus..."));
+    const std::uint64_t request_id = enqueue_build();
+    if (request_id != 0) {
+        transition_to(std::make_shared<BuildingCorpusState>(
+            request_id, workspace_revision_));
+    }
+}
+
+void MainWindow::invalidate_workspace() {
+    processing_core_.reset();
+    clear_processing_outputs();
+    workspace_widget_->set_corpus_status(
+        workspace_.documents().empty() ? tr("Corpus: Not built")
+                                       : tr("Corpus: Needs rebuild"));
+}
+
+void MainWindow::reset_state() {
+    cancel_build();
+    processing_core_.reset();
+    clear_processing_outputs();
+    workspace_widget_->set_corpus_status(tr("Corpus: Not built"));
+    status_label_->setText(tr("Application reset."));
+    transition_to(std::make_shared<EmptyCorpusState>());
+}
+
+void MainWindow::publish_build(std::shared_ptr<const ProcessingCore> core) {
+    processing_core_ = std::move(core);
+    workspace_widget_->set_corpus_status(
+        tr("Corpus: %1 chunks")
+            .arg(static_cast<qulonglong>(processing_core_->chunk_count())));
+    status_label_->setText(tr("Corpus built."));
+}
+
+void MainWindow::report_build_failure(const std::string& error) {
+    workspace_widget_->set_corpus_status(tr("Corpus: Needs rebuild"));
+    QString message = tr("Corpus build failed.");
+    if (!error.empty()) {
+        message += QStringLiteral(" ") + QString::fromStdString(error);
+    }
+    status_label_->setText(message);
+}
+
+void MainWindow::transition_to(std::shared_ptr<CorpusState> state) {
+    corpus_state_ = std::move(state);
+    update_action_states();
 }
 
 void MainWindow::update_action_states() {
     const bool has_documents = !workspace_.documents().empty();
     const bool has_query = search_widget_->has_query();
-    workspace_widget_->set_build_corpus_enabled(has_documents && !build_state_);
-    search_widget_->set_search_enabled(corpus_current_ && has_query);
-    term_inspector_widget_->set_inspection_enabled(corpus_current_);
-    context_widget_->set_build_context_enabled(corpus_current_ && has_query);
-}
-
-void MainWindow::invalidate_corpus() {
-    corpus_current_ = false;
-    workspace_widget_->set_corpus_status(tr("Corpus: Needs rebuild"));
-    clear_processing_outputs();
-    update_action_states();
+    const bool corpus_current = corpus_state_->is_current();
+    workspace_widget_->set_build_corpus_enabled(has_documents);
+    search_widget_->set_search_enabled(corpus_current && has_query);
+    term_inspector_widget_->set_inspection_enabled(corpus_current);
+    context_widget_->set_build_context_enabled(corpus_current && has_query);
 }
 
 void MainWindow::clear_processing_outputs() {

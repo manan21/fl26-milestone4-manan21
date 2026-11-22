@@ -6,9 +6,11 @@
 #include "aiws/workspace.hpp"
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
-#include <future>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -20,12 +22,19 @@ class QWidget;
 namespace aiws::gui {
 
 class ContextWidget;
+class CorpusState;
+class EmptyCorpusState;
+class BuildingCorpusState;
+class NeedsBuildCorpusState;
+class CurrentCorpusState;
+class StoppedCorpusState;
+struct BuildCompletion;
 class SearchWidget;
 class TermInspectorWidget;
 class WorkspaceWidget;
 
 /**
- * @brief Main application window and coordinator for the M3 AI Workspace GUI.
+ * @brief Main application window and coordinator for the AI Workspace GUI.
  *
  * MainWindow owns the application Workspace and ProcessingCore, composes the
  * major GUI components, and coordinates application-wide state changes and
@@ -74,9 +83,6 @@ public:
 private slots:
     /** @brief Handles a request to select and add a document to the workspace. */
     void add_document();
-
-    /** Checks for completion of the background corpus build. */
-    void poll_build_result();
 
     /** Applies an already-validated remote document on the GUI thread. */
     void add_remote_document(const QString& path);
@@ -133,23 +139,33 @@ private slots:
     void exit_application();
 
 private:
-    struct BuildResult {
-        std::unique_ptr<ProcessingCore> core;
-        std::string error;
-    };
+    friend class EmptyCorpusState;
+    friend class BuildingCorpusState;
+    friend class NeedsBuildCorpusState;
+    friend class CurrentCorpusState;
+    friend class StoppedCorpusState;
 
-    struct BuildState {
-        std::future<BuildResult> result;
-        std::thread worker;
-        std::shared_ptr<std::atomic<bool>> cancelled;
-        std::uint64_t revision{0};
-        bool accepted{false};
+    struct BuildRequest {
+        std::uint64_t id;
+        std::uint64_t revision;
+        Workspace snapshot;
+        int delay_ms;
     };
 
     void closeEvent(class QCloseEvent* event) override;
-    void stop_build();
-    void join_build();
-    void start_ipc_worker(const QString& socket_path);
+    void worker_loop();
+    void stop_worker();
+    void wait_for_build_step(std::uint64_t request_id, int delay_ms);
+    std::uint64_t enqueue_build();
+    void cancel_build();
+    void handle_build_completion(
+        std::shared_ptr<const BuildCompletion> completion);
+    void begin_build();
+    void invalidate_workspace();
+    void reset_state();
+    void publish_build(std::shared_ptr<const ProcessingCore> core);
+    void report_build_failure(const std::string& error);
+    void transition_to(std::shared_ptr<CorpusState> state);
 
     /**
      * @brief Updates availability of actions that depend on current application state.
@@ -157,30 +173,29 @@ private:
     void update_action_states();
 
     /**
-     * @brief Marks the processing corpus as no longer current for the workspace.
-     *
-     * Processing output that depends on the previous corpus is no longer made
-     * available after invalidation.
-     */
-    void invalidate_corpus();
-
-    /**
      * @brief Clears displayed search and context output that depends on processing state.
      */
     void clear_processing_outputs();
 
     Workspace workspace_;
-    ProcessingCore processing_core_;
-    bool corpus_current_{false};
+    std::shared_ptr<const ProcessingCore> processing_core_;
     std::uint64_t workspace_revision_{0};
     int build_delay_ms_{0};
     ExitCallback exit_callback_{nullptr};
-    std::unique_ptr<BuildState> build_state_;
-    class QTimer* build_timer_{nullptr};
+    std::shared_ptr<CorpusState> corpus_state_;
+
+    std::mutex build_mutex_;
+    std::condition_variable build_condition_;
+    std::optional<BuildRequest> pending_build_;
+    std::uint64_t build_generation_{0};
+    bool worker_busy_{false};
+    bool worker_stopping_{false};
+    std::thread build_worker_;
+
     std::thread ipc_thread_;
-    std::shared_ptr<std::atomic<bool>> ipc_stop_;
+    std::atomic<bool> ipc_stop_{false};
     QString ipc_socket_path_;
-    std::atomic<int> ipc_listen_socket_{-1};
+    std::atomic<int> ipc_client_socket_{-1};
 
     WorkspaceWidget* workspace_widget_{nullptr};
     SearchWidget* search_widget_{nullptr};
