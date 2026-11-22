@@ -273,8 +273,8 @@ void MainWindowTests::remote_add_handles_utf8_and_partial_writes() {
             sizeof(address.sun_path));
     std::memcpy(address.sun_path, socket_bytes.constData(),
                 static_cast<std::size_t>(socket_bytes.size()));
-    QVERIFY(connect(client, reinterpret_cast<sockaddr*>(&address),
-                    sizeof(address)) == 0);
+    QVERIFY(::connect(client, reinterpret_cast<sockaddr*>(&address),
+                      sizeof(address)) == 0);
 
     const QByteArray payload = QByteArrayLiteral("ADD ") + file_path.toUtf8();
     const std::uint32_t length = htonl(
@@ -332,8 +332,8 @@ void MainWindowTests::stopping_server_unblocks_partial_request() {
     const QByteArray socket_bytes = socket_path.toUtf8();
     std::memcpy(address.sun_path, socket_bytes.constData(),
                 static_cast<std::size_t>(socket_bytes.size()));
-    QVERIFY(connect(client, reinterpret_cast<sockaddr*>(&address),
-                    sizeof(address)) == 0);
+    QVERIFY(::connect(client, reinterpret_cast<sockaddr*>(&address),
+                      sizeof(address)) == 0);
     const std::uint32_t length = htonl(128);
     QCOMPARE(send(client, &length, sizeof(length), MSG_NOSIGNAL),
              static_cast<ssize_t>(sizeof(length)));
