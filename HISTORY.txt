@@ -1,4 +1,26 @@
-﻿commit 6040af8ac553660da201150464f33178d61d1be0
+﻿commit ec9158ec2eba7c8cf4b39f93bf1ff4e8c9d67395
+Author: manansharma <manansharma@vt.edu>
+Date:   2026-11-22 16:59:03 -0600
+
+    Clarify M4 CR-1 remediation in design record
+
+    Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+
+ DESIGN.md | 17 ++++++++++++-----
+ 1 file changed, 12 insertions(+), 5 deletions(-)
+
+commit 7d408f6056e8cc2070184f5811e08afb2f067e26
+Author: manansharma <manansharma@vt.edu>
+Date:   2026-11-22 16:55:30 -0600
+
+    Normalize generated history output
+
+    Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+
+ HISTORY.txt | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+
+commit 6040af8ac553660da201150464f33178d61d1be0
 Author: manansharma <manansharma@vt.edu>
 Date:   2026-11-22 16:55:12 -0600
 
