@@ -15,6 +15,10 @@
 
 namespace {
 
+using Deadline = std::chrono::steady_clock::time_point;
+
+constexpr int kRequestTimeoutMs = 1000;
+
 std::string default_socket() {
     const char* user = getenv("USER");
     if (user != nullptr && user[0] != '\0') {
@@ -28,8 +32,33 @@ bool set_nonblocking(int fd) {
     return flags >= 0 && fcntl(fd, F_SETFL, flags | O_NONBLOCK) >= 0;
 }
 
-bool send_all(int fd, const char* data, std::size_t length) {
+bool wait_for_event(int fd, short events, Deadline deadline) {
+    while (true) {
+        const auto remaining = std::chrono::duration_cast<
+            std::chrono::milliseconds>(deadline -
+                                       std::chrono::steady_clock::now())
+                                   .count();
+        if (remaining <= 0) {
+            return false;
+        }
+
+        pollfd poll_fd{fd, events, 0};
+        const int ready = poll(&poll_fd, 1, static_cast<int>(remaining));
+        if (ready > 0) {
+            return (poll_fd.revents & events) != 0;
+        }
+        if (ready == 0 || errno != EINTR) {
+            return false;
+        }
+    }
+}
+
+bool send_all(int fd, const char* data, std::size_t length,
+              Deadline deadline) {
     while (length > 0) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return false;
+        }
         const ssize_t sent = send(fd, data, length, MSG_NOSIGNAL);
         if (sent > 0) {
             data += sent;
@@ -37,8 +66,9 @@ bool send_all(int fd, const char* data, std::size_t length) {
         } else if (sent < 0 && (errno == EINTR)) {
             continue;
         } else if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            pollfd poll_fd{fd, POLLOUT, 0};
-            if (poll(&poll_fd, 1, 1500) != 1) return false;
+            if (!wait_for_event(fd, POLLOUT, deadline)) {
+                return false;
+            }
         } else {
             return false;
         }
@@ -46,9 +76,8 @@ bool send_all(int fd, const char* data, std::size_t length) {
     return true;
 }
 
-bool receive_exact(int fd, char* data, std::size_t length, int timeout_ms) {
-    const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+bool receive_exact(int fd, char* data, std::size_t length,
+                   Deadline deadline) {
     while (length > 0) {
         if (std::chrono::steady_clock::now() >= deadline) return false;
         const ssize_t received = recv(fd, data, length, 0);
@@ -60,10 +89,9 @@ bool receive_exact(int fd, char* data, std::size_t length, int timeout_ms) {
         } else if (errno == EINTR) {
             continue;
         } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            pollfd poll_fd{fd, POLLIN, 0};
-            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-                deadline - std::chrono::steady_clock::now()).count();
-            if (poll(&poll_fd, 1, static_cast<int>(remaining)) != 1) return false;
+            if (!wait_for_event(fd, POLLIN, deadline)) {
+                return false;
+            }
         } else {
             return false;
         }
@@ -104,6 +132,8 @@ int main(int argc, char** argv) {
         return 2;
     }
     std::memcpy(address.sun_path, socket_path.data(), socket_path.size());
+    const Deadline deadline = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(kRequestTimeoutMs);
     const int connected =
         connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address));
     if (connected < 0 && errno != EINPROGRESS) {
@@ -111,9 +141,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     if (connected < 0) {
-        pollfd poll_fd{fd, POLLOUT, 0};
-        if (poll(&poll_fd, 1, 1500) != 1 ||
-            (poll_fd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+        if (!wait_for_event(fd, POLLOUT, deadline)) {
             close(fd);
             return 2;
         }
@@ -129,14 +157,14 @@ int main(int argc, char** argv) {
 
     std::string payload = std::string("ADD ") + resolved_path;
     std::uint32_t length = htonl(static_cast<std::uint32_t>(payload.size()));
-    if (!send_all(fd, reinterpret_cast<const char*>(&length), 4) ||
-        !send_all(fd, payload.data(), payload.size())) {
+    if (!send_all(fd, reinterpret_cast<const char*>(&length), 4, deadline) ||
+        !send_all(fd, payload.data(), payload.size(), deadline)) {
         close(fd);
         return 2;
     }
 
     char response_header[2] = {};
-    if (!receive_exact(fd, response_header, 2, 1500)) {
+    if (!receive_exact(fd, response_header, 2, deadline)) {
         close(fd);
         return 2;
     }

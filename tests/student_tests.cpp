@@ -99,6 +99,7 @@ private slots:
     void close_stops_active_build();
     void idle_shutdown_completes();
     void remote_add_handles_utf8_and_partial_writes();
+    void remote_sender_times_out_when_server_does_not_reply();
     void stopping_server_unblocks_partial_request();
 };
 
@@ -316,6 +317,56 @@ void MainWindowTests::remote_add_handles_utf8_and_partial_writes() {
 
     window.stop_ipc_server();
     QVERIFY(!QFileInfo::exists(socket_path));
+}
+
+void MainWindowTests::remote_sender_times_out_when_server_does_not_reply() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString socket_path =
+        directory.filePath(QStringLiteral("unresponsive.sock"));
+    const QString missing_socket_path =
+        directory.filePath(QStringLiteral("missing.sock"));
+    const QString file_path = directory.filePath(QStringLiteral("document.txt"));
+    QVERIFY(write_document(file_path, "remote document\n"));
+
+    const QString sender_path = QDir(QCoreApplication::applicationDirPath())
+                                    .filePath(QStringLiteral("aiws_send"));
+    QProcess unavailable_sender;
+    QElapsedTimer unavailable_timer;
+    unavailable_timer.start();
+    unavailable_sender.start(
+        sender_path,
+        {QStringLiteral("--socket"), missing_socket_path,
+         QStringLiteral("add"), file_path});
+    QVERIFY(unavailable_sender.waitForFinished(1800));
+    QCOMPARE(unavailable_sender.exitStatus(), QProcess::NormalExit);
+    QCOMPARE(unavailable_sender.exitCode(), 2);
+    QVERIFY(unavailable_timer.elapsed() < 1500);
+
+    const int server = socket(AF_UNIX, SOCK_STREAM, 0);
+    QVERIFY(server >= 0);
+    sockaddr_un address{};
+    address.sun_family = AF_UNIX;
+    const QByteArray socket_bytes = socket_path.toUtf8();
+    QVERIFY(static_cast<std::size_t>(socket_bytes.size()) <
+            sizeof(address.sun_path));
+    std::memcpy(address.sun_path, socket_bytes.constData(),
+                static_cast<std::size_t>(socket_bytes.size()));
+    QVERIFY(::bind(server, reinterpret_cast<sockaddr*>(&address),
+                   sizeof(address)) == 0);
+    QVERIFY(::listen(server, 1) == 0);
+
+    QProcess sender;
+    QElapsedTimer timer;
+    timer.start();
+    sender.start(sender_path,
+                 {QStringLiteral("--socket"), socket_path,
+                  QStringLiteral("add"), file_path});
+    QVERIFY(sender.waitForFinished(1800));
+    QCOMPARE(sender.exitStatus(), QProcess::NormalExit);
+    QCOMPARE(sender.exitCode(), 2);
+    QVERIFY(timer.elapsed() < 1500);
+    ::close(server);
 }
 
 void MainWindowTests::stopping_server_unblocks_partial_request() {

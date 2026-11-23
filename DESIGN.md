@@ -5,8 +5,11 @@
 `MainWindow::start_ipc_server`, `stop_ipc_server`, and `receive_exact` changed:
 startup binds synchronously, reads partial frames to a deadline, and can
 interrupt an active client. `aiws_send::main` now checks `connect`'s return
-value. The listener descriptor is thread-local, so `ipc_listen_socket_` was
-removed. `add_remote_document` and the wire format (4-byte big-endian length;
+value and shares one monotonic one-second deadline across connection, write,
+and response reads, returning 2 promptly if the endpoint is unavailable or
+stalled. A readable response is consumed even if the peer closes immediately.
+The listener descriptor is thread-local, so `ipc_listen_socket_` was removed.
+`add_remote_document` and the wire format (4-byte big-endian length;
 `ADD ` plus absolute UTF-8 path; `OK`/`ERR`) stayed unchanged to preserve queued
 GUI mutation and immediate replies; `add_document_file` retains its public API.
 M4 cancellation skipped the delay but continued chunking; M5 aborts obsolete
